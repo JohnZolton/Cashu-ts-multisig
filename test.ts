@@ -12,6 +12,109 @@ import {
   MintKeys,
 } from "@cashu/cashu-ts";
 import { hashToCurve, pointFromHex } from "@cashu/crypto/modules/common/index";
+import { PrivKey, bytesToHex, hexToBytes } from "@noble/curves/abstract/utils";
+//import { parseSecret } from "@cashu/crypto/src/common/NUT11";
+import { parseSecret } from "@cashu/crypto/modules/common/NUT11";
+import { Proof, Secret, BlindSignature } from "@cashu/crypto/src/common";
+import {
+  BlindedMessage,
+  blindMessage,
+  createRandomBlindedMessage,
+} from "@cashu/crypto/src/client/index";
+import { ProjPointType } from "@noble/curves/abstract/weierstrass";
+import { pointFromBytes } from "@cashu/crypto/src/common";
+
+export const createP2PKsecret = (params: {
+  basePubkey: string;
+  requiredSigs?: number;
+  locktime?: number;
+  refundPubkey?: string;
+  additionalPubkeys?: string[];
+}): Uint8Array => {
+  const tags: Array<[string, ...string[]]> = [];
+
+  if (params.requiredSigs !== undefined) {
+    tags.push(["n_sigs", params.requiredSigs.toString()]);
+  }
+  if (params.locktime !== undefined) {
+    tags.push(["locktime", params.locktime.toString()]);
+  }
+  if (params.refundPubkey !== undefined) {
+    tags.push(["refund", params.refundPubkey]);
+  }
+  if (params.additionalPubkeys?.length) {
+    tags.push(["pubkeys", ...params.additionalPubkeys]);
+  }
+
+  const secret: Secret = [
+    "P2PK", //kind
+    {
+      nonce: bytesToHex(randomBytes(32)),
+      data: params.basePubkey, //spend condition
+      tags,
+    },
+  ];
+  const parsed = JSON.stringify(secret);
+  return new TextEncoder().encode(parsed);
+};
+
+export const signP2PKsecret = (secret: Uint8Array, privateKey: PrivKey) => {
+  const msghash = sha256(new TextDecoder().decode(secret));
+  const sig = schnorr.sign(msghash, privateKey);
+  return sig;
+};
+
+export const signBlindedMessage = (
+  B_: string,
+  privateKey: PrivKey
+): Uint8Array => {
+  const msgHash = sha256(B_);
+  const sig = schnorr.sign(msgHash, privateKey);
+  return sig;
+};
+
+export const getSignedProofs = (
+  proofs: Array<Proof>,
+  privateKey: string
+): Array<Proof> => {
+  return proofs.map((p) => {
+    try {
+      const parsed: Secret = parseSecret(p.secret);
+      if (parsed[0] !== "P2PK") {
+        throw new Error("unknown secret type");
+      }
+      return getSignedProof(p, hexToBytes(privateKey));
+    } catch (error) {
+      return p;
+    }
+  });
+};
+
+export const getSignedOutput = (
+  output: BlindedMessage,
+  privateKey: PrivKey
+): BlindedMessage => {
+  const B_ = output.B_.toHex(true);
+  const signature = signBlindedMessage(B_, privateKey);
+  output.witness = { signatures: [bytesToHex(signature)] };
+  return output;
+};
+
+export const getSignedOutputs = (
+  outputs: Array<BlindedMessage>,
+  privateKey: string
+): Array<BlindedMessage> => {
+  return outputs.map((o) => getSignedOutput(o, privateKey));
+};
+
+export const getSignedProof = (proof: Proof, privateKey: PrivKey): Proof => {
+  if (!proof.witness) {
+    proof.witness = {
+      signatures: [bytesToHex(signP2PKsecret(proof.secret, privateKey))],
+    };
+  }
+  return proof;
+};
 
 const secKey1 = generateSecretKey();
 const secKey2 = generateSecretKey();
@@ -20,20 +123,11 @@ const pubKey1 = getPublicKey(secKey1);
 const pubKey2 = getPublicKey(secKey2);
 const pubKey3 = getPublicKey(secKey3);
 
-// Types
-type BlindedMessage = {
-  id: string;
-  amount: number;
-  B_: string;
-};
+console.log(pubKey1);
+console.log(pubKey2);
+console.log(pubKey3);
 
-type BlindSignature = {
-  amount: number;
-  id: string;
-  C_: string;
-};
-
-type Proof = {
+type ProofObj = {
   id: string;
   amount: number;
   secret: string;
@@ -42,90 +136,6 @@ type Proof = {
     signatures: string[];
   };
 };
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((byte) => byte.toString(16).padStart(2, "0")) // Convert to hex and pad to 2 digits
-    .join(""); // Concatenate all hex strings
-}
-
-class CashuMultiSig {
-  static createMultiSigSecret(params: {
-    basePubkey: string;
-    requiredSigs: number;
-    locktime: number;
-    refundPubkey: string;
-    additionalPubkeys: string[];
-  }) {
-    const secret = [
-      "P2PK", //kind
-      {
-        nonce: randomBytes(32).toString("hex"), //unique random string
-        data: params.basePubkey, //spend condition
-        tags: [
-          ["n_sigs", params.requiredSigs.toString()],
-          ["locktime", params.locktime.toString()],
-          ["refund", params.refundPubkey],
-          ["pubkeys", ...params.additionalPubkeys],
-        ],
-      },
-    ];
-    return JSON.stringify(secret);
-  }
-
-  static createBlindedMessage(amount: number, keysetId: string) {
-    let secret: Buffer = randomBytes(32);
-
-    let point: ProjectivePoint | null = null;
-    while (!point) {
-      try {
-        const hash = sha256(secret);
-        const hashHex = bytesToHex(hash);
-        const pointX = "02" + hashHex;
-        point = ProjectivePoint.fromHex(pointX);
-        break;
-      } catch (error) {
-        // If point creation fails, hash the previous attempt and try again
-        secret = Buffer.from(sha256(secret));
-      }
-    }
-
-    const Y = point;
-    const r = BigInt("0x" + randomBytes(32).toString("hex"));
-    const rG = ProjectivePoint.BASE.multiply(r);
-    const B_ = Y.add(rG);
-
-    return {
-      blindedMessage: {
-        amount,
-        id: keysetId,
-        B_: B_.toHex(true),
-      },
-      blindingFactor: r,
-    };
-  }
-
-  static createProofFromBlindSignature(params: {
-    amount: number;
-    keysetId: string;
-    mintPublicKey: ProjectivePoint;
-    blindSignature: string;
-    blindingFactor: bigint;
-    secret: string;
-  }) {
-    const C_ = ProjectivePoint.fromHex(params.blindSignature);
-    //const C_ = pointFromHex(params.blindSignature)
-    const rK = params.mintPublicKey.multiply(params.blindingFactor);
-    const C = C_.add(rK.negate());
-
-    return {
-      id: params.keysetId,
-      amount: params.amount,
-      secret: params.secret,
-      C: C.toHex(true),
-    };
-  }
-}
 
 // Test function
 async function testP2PK() {
@@ -146,120 +156,21 @@ async function testP2PK() {
   const { keep, send } = await wallet.send(amount, proofs, {
     includeFees: true,
   });
-  const feeAmount = await wallet.getFeesForProofs(send);
+  const feeAmount = wallet.getFeesForProofs(send);
   console.log(send);
   console.log("fees: ", feeAmount);
 
-  const secret = CashuMultiSig.createMultiSigSecret({
-    basePubkey: pubKey1,
-    requiredSigs: 1,
-    locktime: Math.floor(Date.now() / 1000 + 600), //10 minutes
-    refundPubkey: pubKey2,
-    additionalPubkeys: [pubKey1, pubKey2, pubKey3],
-  });
-
-  console.log("SECRET: ", secret);
-
-  // a good way to fee swap would be nice...
-
-  let remainingFee = feeAmount;
-  const feeProofIndices: number[] = [];
-  const spendableProofs = [...send];
-
-  for (let i = 0; i < spendableProofs.length && remainingFee > 0; i++) {
-    if (spendableProofs[i]!.amount <= remainingFee) {
-      remainingFee -= spendableProofs[i]!.amount;
-      feeProofIndices.push(i);
-    }
-  }
-  const proofsForBlinding = spendableProofs.filter(
-    (_, index) => !feeProofIndices.includes(index)
-  );
-
-  const { blindedMessages, blindingFactors } = proofsForBlinding.reduce(
-    (acc, proof, index) => {
-      const { blindedMessage, blindingFactor } =
-        CashuMultiSig.createBlindedMessage(proof.amount, proof.id);
-      return {
-        blindedMessages: [...acc.blindedMessages, blindedMessage],
-        blindingFactors: [...acc.blindingFactors, blindingFactor],
-      };
-    },
-    {
-      blindedMessages: [] as BlindedMessage[],
-      blindingFactors: [] as bigint[],
-    }
-  );
-
-  console.log("Blinded messages:", blindedMessages);
-
-  console.log("Blinded messages:", blindedMessages);
-
-  const response = await fetch(`${MINT_URL}/v1/swap`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ inputs: send, outputs: blindedMessages }),
-  });
-
-  interface MintResponse {
-    signatures: BlindSignature[];
-  }
-  const { signatures } = (await response.json()) as MintResponse;
-  console.log("REC'd SIGS: ", signatures);
-
-  if (!signatures) return;
-
-  const newProofs = signatures.map((signature, index) => {
-    return CashuMultiSig.createProofFromBlindSignature({
-      amount: signatures[index]?.amount ?? 0,
-      keysetId: send[index]?.id ?? "",
-      mintPublicKey: ProjectivePoint.fromHex(wallet.mintInfo.pubkey),
-      blindSignature: signature.C_,
-      blindingFactor: blindingFactors[index] ?? BigInt(1),
-      secret,
-    });
-  });
-
-  console.log("new proofs: ", newProofs);
-
-  // FIRST SIG
-  const firstSigs = await Promise.all(
-    newProofs.map(async (proof) => {
-      const messageHash = sha256(proof.secret);
-      const signatureObj = schnorr.sign(messageHash, secKey1);
-      const hexSignature = Buffer.from(signatureObj).toString("hex");
-      console.log("sig obj hex: ", hexSignature);
-      return hexSignature;
+  const rawP2PKProofs = send.map((proof) =>
+    createP2PKsecret({
+      basePubkey: pubKey1,
+      requiredSigs: 1,
+      locktime: Math.floor(new Date().getTime() + 6 * 60 * 1000),
+      refundPubkey: pubKey2,
+      additionalPubkeys: [pubKey3],
     })
   );
-  console.log(signatures);
 
-  const oneOfTwoSignedProofs = newProofs.map((proof, index) => ({
-    ...proof,
-    witness: { signatures: [firstSigs[index]] },
-  }));
-
-  const formattedProofs = oneOfTwoSignedProofs.map((proof) => ({
-    ...proof,
-    witness: JSON.stringify(proof.witness),
-  }));
-
-  console.log("TWO OF TWO SIGS: ", formattedProofs);
-  // TODO exchange signed proofs for new
-  const winnings = formattedProofs.reduce(
-    (acc, proof) => acc + proof.amount,
-    0
-  );
-  const fees = await wallet?.getFeesForProofs(formattedProofs);
-  //ERROR COULD NOT VERIFY PROOFS
-  const cleanProofs = await wallet?.swap(fees ? winnings - fees : 0, [
-    ...proofs,
-    ...formattedProofs,
-  ]);
-
-  console.log("CLEAN PROOFS:", cleanProofs);
+  console.log(rawP2PKProofs);
 }
 
 // Run the test
