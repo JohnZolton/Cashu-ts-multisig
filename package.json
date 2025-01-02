@@ -5,7 +5,10 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "test": "node --loader ts-node/esm test.ts"
+    "test": "node --loader ts-node/esm --experimental-specifier-resolution=node test.ts"
+  },
+  "exports": {
+    "./src/*": "./src/*"
   },
   "keywords": [],
   "author": "",
@@ -18,11 +21,10 @@
     "@noble/secp256k1": "^2.1.0",
     "noble": "^1.9.1",
     "nostr-tools": "^2.10.4",
-    "ts-node": "^10.9.2",
     "typescript": "^5.7.2"
   },
   "devDependencies": {
-    "ts-node": "^10.0.0",
+    "ts-node": "^10.9.2",
     "typescript": "^5.0.0"
   }
 }

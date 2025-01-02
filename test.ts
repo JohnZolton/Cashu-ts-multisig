@@ -1,5 +1,5 @@
 import { sha256 } from "@noble/hashes/sha256";
-import { randomBytes } from "crypto";
+import { randomBytes, sign } from "crypto";
 import { schnorr } from "@noble/curves/secp256k1";
 import { generateSecretKey, getPublicKey } from "nostr-tools";
 import { ProjectivePoint } from "@noble/secp256k1";
@@ -11,51 +11,26 @@ import {
   MintPayload,
   MintKeys,
 } from "@cashu/cashu-ts";
-import { hashToCurve, pointFromHex } from "@cashu/crypto/modules/common/index";
+//import { hashToCurve, pointFromHex } from "@cashu/crypto/modules/common/index";
 import { PrivKey, bytesToHex, hexToBytes } from "@noble/curves/abstract/utils";
-//import { parseSecret } from "@cashu/crypto/src/common/NUT11";
-import { parseSecret } from "@cashu/crypto/modules/common/NUT11";
-import { Proof, Secret, BlindSignature } from "@cashu/crypto/src/common";
+//import { getSignedProofs } from "@cashu/crypto/modules/client/NUT11";
+import { Proof, Secret, BlindSignature } from "@cashu/crypto/modules/common";
 import {
   BlindedMessage,
   blindMessage,
   createRandomBlindedMessage,
-} from "@cashu/crypto/src/client/index";
+} from "@cashu/crypto/modules/client";
 import { ProjPointType } from "@noble/curves/abstract/weierstrass";
-import { pointFromBytes } from "@cashu/crypto/src/common";
-
-export const createP2PKsecret = (params: {
-  basePubkey: string;
-  requiredSigs?: number;
-  locktime?: number;
-  refundPubkey?: string;
-  additionalPubkeys?: string[];
-}): Uint8Array => {
-  const tags: Array<[string, ...string[]]> = [];
-
-  if (params.requiredSigs !== undefined) {
-    tags.push(["n_sigs", params.requiredSigs.toString()]);
+import { pointFromBytes } from "@cashu/crypto/modules/common";
+export const parseSecret = (secret: string | Uint8Array): Secret => {
+  try {
+    if (secret instanceof Uint8Array) {
+      secret = new TextDecoder().decode(secret);
+    }
+    return JSON.parse(secret);
+  } catch (e) {
+    throw new Error("can't parse secret");
   }
-  if (params.locktime !== undefined) {
-    tags.push(["locktime", params.locktime.toString()]);
-  }
-  if (params.refundPubkey !== undefined) {
-    tags.push(["refund", params.refundPubkey]);
-  }
-  if (params.additionalPubkeys?.length) {
-    tags.push(["pubkeys", ...params.additionalPubkeys]);
-  }
-
-  const secret: Secret = [
-    "P2PK", //kind
-    {
-      nonce: bytesToHex(randomBytes(32)),
-      data: params.basePubkey, //spend condition
-      tags,
-    },
-  ];
-  const parsed = JSON.stringify(secret);
-  return new TextEncoder().encode(parsed);
 };
 
 export const signP2PKsecret = (secret: Uint8Array, privateKey: PrivKey) => {
@@ -116,6 +91,40 @@ export const getSignedProof = (proof: Proof, privateKey: PrivKey): Proof => {
   return proof;
 };
 
+export const createP2PKsecret = (params: {
+  basePubkey: string;
+  requiredSigs?: number;
+  locktime?: number;
+  refundPubkey?: string;
+  additionalPubkeys?: string[];
+}): Uint8Array => {
+  const tags: Array<[string, ...string[]]> = [];
+
+  if (params.requiredSigs !== undefined) {
+    tags.push(["n_sigs", params.requiredSigs.toString()]);
+  }
+  if (params.locktime !== undefined) {
+    tags.push(["locktime", params.locktime.toString()]);
+  }
+  if (params.refundPubkey !== undefined) {
+    tags.push(["refund", params.refundPubkey]);
+  }
+  if (params.additionalPubkeys?.length) {
+    tags.push(["pubkeys", ...params.additionalPubkeys]);
+  }
+
+  const secret: Secret = [
+    "P2PK", //kind
+    {
+      nonce: bytesToHex(randomBytes(32)),
+      data: params.basePubkey, //spend condition
+      tags,
+    },
+  ];
+  const parsed = JSON.stringify(secret);
+  return new TextEncoder().encode(parsed);
+};
+
 const secKey1 = generateSecretKey();
 const secKey2 = generateSecretKey();
 const secKey3 = generateSecretKey();
@@ -171,6 +180,18 @@ async function testP2PK() {
   );
 
   console.log(rawP2PKProofs);
+
+  console.log(rawP2PKProofs);
+
+  const p2pkProofs: Proof[] = send.map((proof, index) => ({
+    ...proof,
+    secret: rawP2PKProofs[index],
+    C: pointFromBytes(rawP2PKProofs[index]), //convert Uint8 bytes array to projpoint type
+  }));
+
+  const signedProofs = getSignedProofs(p2pkProofs, bytesToHex(secKey1));
+
+  console.log("Signed PRoofs:", signedProofs);
 }
 
 // Run the test
