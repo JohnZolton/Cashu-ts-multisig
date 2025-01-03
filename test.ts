@@ -11,10 +11,16 @@ import {
   MintPayload,
   MintKeys,
 } from "@cashu/cashu-ts";
-//import { hashToCurve, pointFromHex } from "@cashu/crypto/modules/common/index";
+import { pointFromHex } from "@cashu/crypto/modules/common";
 import { PrivKey, bytesToHex, hexToBytes } from "@noble/curves/abstract/utils";
 //import { getSignedProofs } from "@cashu/crypto/modules/client/NUT11";
-import { Proof, Secret, BlindSignature } from "@cashu/crypto/modules/common";
+
+import {
+  Proof,
+  Secret,
+  BlindSignature,
+  hashToCurve,
+} from "@cashu/crypto/modules/common";
 import {
   BlindedMessage,
   blindMessage,
@@ -22,6 +28,7 @@ import {
 } from "@cashu/crypto/modules/client";
 import { ProjPointType } from "@noble/curves/abstract/weierstrass";
 import { pointFromBytes } from "@cashu/crypto/modules/common";
+
 export const parseSecret = (secret: string | Uint8Array): Secret => {
   try {
     if (secret instanceof Uint8Array) {
@@ -46,6 +53,14 @@ export const signBlindedMessage = (
   const msgHash = sha256(B_);
   const sig = schnorr.sign(msgHash, privateKey);
   return sig;
+};
+export const hexToString = (hexSecret: string) => {
+  try {
+    const buffer = Buffer.from(hexSecret, "hex");
+    return buffer.toString("utf-8");
+  } catch (error) {
+    throw new Error("Invalid hex string");
+  }
 };
 
 export const getSignedProofs = (
@@ -118,7 +133,7 @@ export const createP2PKsecret = (params: {
     {
       nonce: bytesToHex(randomBytes(32)),
       data: params.basePubkey, //spend condition
-      tags,
+      tags: tags,
     },
   ];
   const parsed = JSON.stringify(secret);
@@ -148,7 +163,7 @@ type ProofObj = {
 
 // Test function
 async function testP2PK() {
-  const MINT_URL = "https://testnut.cashu.space";
+  const MINT_URL = "http://0.0.0.0:3338";
   const mint = new CashuMint(MINT_URL);
   const wallet = new CashuWallet(mint);
   await wallet.loadMint();
@@ -157,41 +172,62 @@ async function testP2PK() {
 
   const proofs = await wallet.mintProofs(64, mintQuote.quote);
 
-  console.log("ORIGINAL PROOFS: ", proofs);
-  console.log("CREATING LOCKED ECASH");
-
   const amount = 32;
 
   const { keep, send } = await wallet.send(amount, proofs, {
     includeFees: true,
   });
   const feeAmount = wallet.getFeesForProofs(send);
-  console.log(send);
   console.log("fees: ", feeAmount);
 
-  const rawP2PKProofs = send.map((proof) =>
+  console.log("CREATING LOCKED ECASH");
+  const rawP2PKProofs = send.map(() =>
     createP2PKsecret({
-      basePubkey: pubKey1,
+      basePubkey: pubKey2,
       requiredSigs: 1,
       locktime: Math.floor(new Date().getTime() + 6 * 60 * 1000),
-      refundPubkey: pubKey2,
-      additionalPubkeys: [pubKey3],
+      refundPubkey: pubKey1,
+      additionalPubkeys: [pubKey1, pubKey2, pubKey3],
     })
   );
-
-  console.log(rawP2PKProofs);
 
   console.log(rawP2PKProofs);
 
   const p2pkProofs: Proof[] = send.map((proof, index) => ({
     ...proof,
     secret: rawP2PKProofs[index],
-    C: pointFromBytes(rawP2PKProofs[index]), //convert Uint8 bytes array to projpoint type
+    C: pointFromHex(proof.C),
   }));
 
   const signedProofs = getSignedProofs(p2pkProofs, bytesToHex(secKey1));
 
   console.log("Signed PRoofs:", signedProofs);
+
+  const convertedProofs = signedProofs.map((proof) => ({
+    ...proof,
+    secret: hexToString(bytesToHex(proof.secret)),
+    C: proof.C.toHex(true),
+    witness: JSON.stringify(proof.witness),
+  }));
+
+  console.log("converted: ", convertedProofs);
+
+  try {
+    const redeemedProofs = await wallet.swap(30, convertedProofs);
+    console.log("redeemed: ", redeemedProofs);
+  } catch (error: unknown) {
+    if (typeof error === "object" && error !== null) {
+      console.error("Error obj details:");
+      const errorObj = error as Record<string, any>;
+      for (const key in errorObj) {
+        if (Object.prototype.hasOwnProperty.call(error, key)) {
+          console.error(`  ${key}:`, errorObj[key]);
+        }
+      }
+    } else {
+      console.error("error: ", error);
+    }
+  }
 }
 
 // Run the test
